@@ -20,6 +20,7 @@ import skimage.transform
 import urllib.request
 import shutil
 import warnings
+from distutils.version import LooseVersion
 
 # URL from which to download the latest COCO trained weights
 COCO_MODEL_URL = "https://github.com/matterport/Mask_RCNN/releases/download/v2.0/mask_rcnn_coco.h5"
@@ -63,7 +64,7 @@ def compute_iou(box, boxes, box_area, boxes_area):
     boxes_area: array of length boxes_count.
 
     Note: the areas are passed in rather than calculated here for
-          efficency. Calculate once in the caller to avoid duplicate work.
+    efficiency. Calculate once in the caller to avoid duplicate work.
     """
     # Calculate intersection areas
     y1 = np.maximum(box[0], boxes[:, 0])
@@ -96,10 +97,14 @@ def compute_overlaps(boxes1, boxes2):
 
 
 def compute_overlaps_masks(masks1, masks2):
-    '''Computes IoU overlaps between two sets of masks.
+    """Computes IoU overlaps between two sets of masks.
     masks1, masks2: [Height, Width, instances]
-    '''
-    # flatten masks
+    """
+    
+    # If either set of masks is empty return empty result
+    if masks1.shape[-1] == 0 or masks2.shape[-1] == 0:
+        return np.zeros((masks1.shape[-1], masks2.shape[-1]))
+    # flatten masks and compute their areas
     masks1 = np.reshape(masks1 > .5, (-1, masks1.shape[-1])).astype(np.float32)
     masks2 = np.reshape(masks2 > .5, (-1, masks2.shape[-1])).astype(np.float32)
     area1 = np.sum(masks1, axis=0)
@@ -114,7 +119,7 @@ def compute_overlaps_masks(masks1, masks2):
 
 
 def non_max_suppression(boxes, scores, threshold):
-    """Performs non-maximum supression and returns indicies of kept boxes.
+    """Performs non-maximum suppression and returns indices of kept boxes.
     boxes: [N, (y1, x1, y2, x2)]. Notice that (y2, x2) lays outside the box.
     scores: 1-D array of box scores.
     threshold: Float. IoU threshold to use for filtering.
@@ -141,10 +146,10 @@ def non_max_suppression(boxes, scores, threshold):
         # Compute IoU of the picked box with the rest
         iou = compute_iou(boxes[i], boxes[ixs[1:]], area[i], area[ixs[1:]])
         # Identify boxes with IoU over the threshold. This
-        # returns indicies into ixs[1:], so add 1 to get
-        # indicies into ixs.
+        # returns indices into ixs[1:], so add 1 to get
+        # indices into ixs.
         remove_ixs = np.where(iou > threshold)[0] + 1
-        # Remove indicies of the picked and overlapped boxes.
+        # Remove indices of the picked and overlapped boxes.
         ixs = np.delete(ixs, remove_ixs)
         ixs = np.delete(ixs, 0)
     return np.array(pick, dtype=np.int32)
@@ -335,24 +340,13 @@ class Dataset(object):
         assert info['source'] == source
         return info['id']
 
-    def append_data(self, class_info, image_info):
-        self.external_to_class_id = {}
-        for i, c in enumerate(self.class_info):
-            for ds, id in c["map"]:
-                self.external_to_class_id[ds + str(id)] = i
-
-        # Map external image IDs to internal ones.
-        self.external_to_image_id = {}
-        for i, info in enumerate(self.image_info):
-            self.external_to_image_id[info["ds"] + str(info["id"])] = i
-
     @property
     def image_ids(self):
         return self._image_ids
 
     def source_image_link(self, image_id):
         """Returns the path or URL to the image.
-        Override this to return a URL to the image if it's availble online for easy
+        Override this to return a URL to the image if it's available online for easy
         debugging.
         """
         return self.image_info[image_id]["path"]
@@ -448,9 +442,8 @@ def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square
 
     # Resize image using bilinear interpolation
     if scale != 1:
-        image = skimage.transform.resize(
-            image, (round(h * scale), round(w * scale)),
-            order=1, mode="constant", preserve_range=True)
+        image = resize(image, (round(h * scale), round(w * scale)),
+                       preserve_range=True)
 
     # Need padding or cropping?
     if mode == "square":
@@ -534,7 +527,7 @@ def minimize_mask(bbox, mask, mini_shape):
         if m.size == 0:
             raise Exception("Invalid bounding box with area of zero")
         # Resize with bilinear interpolation
-        m = skimage.transform.resize(m, mini_shape, order=1, mode="constant")
+        m = resize(m, mini_shape)
         mini_mask[:, :, i] = np.around(m).astype(np.bool)
     return mini_mask
 
@@ -552,7 +545,7 @@ def expand_mask(bbox, mini_mask, image_shape):
         h = y2 - y1
         w = x2 - x1
         # Resize with bilinear interpolation
-        m = skimage.transform.resize(m, (h, w), order=1, mode="constant")
+        m = resize(m, (h, w))
         mask[y1:y2, x1:x2, i] = np.around(m).astype(np.bool)
     return mask
 
@@ -572,7 +565,7 @@ def unmold_mask(mask, bbox, image_shape):
     """
     threshold = 0.5
     y1, x1, y2, x2 = bbox
-    mask = skimage.transform.resize(mask, (y2 - y1, x2 - x1), order=1, mode="constant")
+    mask = resize(mask, (y2 - y1, x2 - x1))
     mask = np.where(mask >= threshold, 1, 0).astype(np.bool)
 
     # Put the mask in the right location.
@@ -701,7 +694,7 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
         # 3. Find the match
         for j in sorted_ixs:
             # If ground truth box is already matched, go to next one
-            if gt_match[j] > 0:
+            if gt_match[j] > -1:
                 continue
             # If we reach IoU smaller than the threshold, end the loop
             iou = overlaps[i, j]
@@ -887,3 +880,27 @@ def denorm_boxes(boxes, shape):
     scale = np.array([h - 1, w - 1, h - 1, w - 1])
     shift = np.array([0, 0, 1, 1])
     return np.around(np.multiply(boxes, scale) + shift).astype(np.int32)
+
+
+def resize(image, output_shape, order=1, mode='constant', cval=0, clip=True,
+           preserve_range=False, anti_aliasing=False, anti_aliasing_sigma=None):
+    """A wrapper for Scikit-Image resize().
+
+    Scikit-Image generates warnings on every call to resize() if it doesn't
+    receive the right parameters. The right parameters depend on the version
+    of skimage. This solves the problem by using different parameters per
+    version. And it provides a central place to control resizing defaults.
+    """
+    if LooseVersion(skimage.__version__) >= LooseVersion("0.14"):
+        # New in 0.14: anti_aliasing. Default it to False for backward
+        # compatibility with skimage 0.13.
+        return skimage.transform.resize(
+            image, output_shape,
+            order=order, mode=mode, cval=cval, clip=clip,
+            preserve_range=preserve_range, anti_aliasing=anti_aliasing,
+            anti_aliasing_sigma=anti_aliasing_sigma)
+    else:
+        return skimage.transform.resize(
+            image, output_shape,
+            order=order, mode=mode, cval=cval, clip=clip,
+            preserve_range=preserve_range)
